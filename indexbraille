@@ -1,0 +1,170 @@
+#!/usr/bin/env python
+
+#
+# $Id: indexbraille,v 1.6 2014/08/31 04:09:12 mauro Exp $
+#
+#
+# This is an IndexBraille backend for CUPS (www.cups.org)
+#
+# (C) 2014 Mauro <mauro@krutt.org>
+#
+# Released under GPL2
+#
+
+
+import os
+import sys
+import shlex
+import socket
+import logging
+import tempfile
+import subprocess
+import ConfigParser
+
+
+settings_file = "/etc/cups/cups-indexbraille.conf"
+log_file = "/var/log/cups/cups-indexbraille.log"
+
+logging.basicConfig(filename=log_file, level=logging.DEBUG)
+
+
+def usage():
+    """
+    Device Discovery info.
+    params: nil
+    returns: nil
+    """
+    print 'file indexbraille:/ "Unknown" "IndexBraille"'
+
+
+def read_settings():
+    """
+    Returns a dict with the host and port of the IndexBraille printer.
+    params: nil
+    return: dict
+    """
+    settings_dict = {}
+
+    config = ConfigParser.ConfigParser()
+    config.readfp(open(settings_file))
+
+    for sect in config.sections():
+        if sect not in settings_dict.keys():
+            settings_dict[sect] = {}
+
+        for opt in config.options(sect):
+            if opt not in settings_dict[sect].keys():
+                try:
+                    settings_dict[sect][opt] = config.get(sect, opt)
+                except:
+                    settings_dict[sect][opt] = None
+
+    return settings_dict
+
+
+def netcat(hostname, port, content):
+    """
+    Very basic `netcat` attempt.
+    params: (str)hostname, (int)port, (str)content
+    returns: nil
+    """
+    logging.info("Printing via %s:%s" , hostname, port)
+    try:
+        port = int(port)
+    except ValueError as e:
+        print "Port must be numeric \n", e
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((hostname, port))
+    s.sendall(content)
+    s.shutdown(socket.SHUT_WR)
+    while 1:
+        data = s.recv(1024)
+        if data == "":
+            break
+    s.close()
+
+
+def openfile(filename):
+    """
+    Returns file's content.
+    params: (str)filename
+    returns: (str)filename_content if OK, else None.
+    """
+    f_content = None
+    if os.path.isfile(filename):
+        temp_fobj = open(filename, 'r')
+        f_content = ''.join(temp_fobj.readlines())
+        temp_fobj.close()
+
+    return f_content
+
+
+def gsconv(filename):
+    """
+    Converts from PostScript to PDF
+    params: (str)path to filename to convert
+    returns: (str)path to filename converted
+    """
+    logging.info("Processing file (gs) %s" , filename)
+
+    pdfoutput = tempfile.mkstemp(prefix='ib-ps2pdf-')
+    gsconv = "/usr/bin/gs -q -dCompatibilityLevel=1.2 -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -sOutputFile={outputf} -dAutoRotatePages=/PageByPage -dAutoFilterColorImages=false -dColorImageFilter=/FlateEncode -dPDFSETTINGS=/prepress -c .setpdfwrite -f {inputf}".format(outputf=pdfoutput[1], inputf=filename)
+    p = subprocess.Popen(shlex.split(gsconv), stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    p.wait()
+    stdout, stderr = p.communicate()
+
+    return pdfoutput[1]
+
+
+def pdftotext(filename):
+    """
+    Converts from PDF to plain text
+    params: (str)path to filename to convert
+    returns: (str)path to filename converted
+    """
+    logging.info("Processing file (pdf) %s" , filename)
+
+    textoutput = tempfile.mkstemp(prefix='ib-pdf2txt-')
+    pdftotext = "/usr/bin/pdftotext"
+    p = subprocess.Popen([pdftotext, filename, textoutput[1]], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    p.wait()
+    stdout, stderr = p.communicate()
+
+    return textoutput[1]
+
+
+def cupsprint(argv, stdin):
+    """
+    Converts and prints a file given (from sys.argv or sys.stdin).
+    params: (array)argv, (array)stdin
+    returns: nil
+    """
+    settings = read_settings()
+
+    logging.info("Calling cupsprint, args: %s" , " | ".join(argv))
+    jobid, user, title, copies, options, filename = argv
+
+    filetoprint = pdftotext(gsconv(filename))
+    content = openfile(filetoprint)
+
+    netcat(settings['printer']['host'],
+           settings['printer']['port'],
+           content)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    logging.info("IndexBraille starts (%s)" , sys.argv[0])
+
+    if len(sys.argv) < 7:
+        logging.warning("Incorrect arguments: %s" , " | ".join(sys.argv))
+        usage()
+        sys.exit(1)
+    else:
+        argv = sys.argv
+        argv.remove(argv[0])
+        cupsprint(sys.argv, sys.stdin)
